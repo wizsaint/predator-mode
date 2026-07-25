@@ -1,0 +1,99 @@
+#!/bin/bash
+
+PROFILE_PATH="/sys/firmware/acpi/platform_profile"
+AVAILABLE=$(cat "${PROFILE_PATH}_choices" 2>/dev/null)
+CONFIG_DIR="${HOME}/.config/predator-mode"
+CONFIG_FILE="${CONFIG_DIR}/config"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+get_default() {
+    if [ -f "$CONFIG_FILE" ]; then
+        grep -m1 "^default=" "$CONFIG_FILE" | cut -d'=' -f2
+    else
+        echo "balanced-performance"
+    fi
+}
+
+show_help() {
+    echo -e "${BOLD}predator-mode${NC} — Acer Predator platform profile switcher"
+    echo ""
+    echo -e "${BOLD}Usage:${NC}"
+    echo "  predator-mode [profile]       Set a profile (uses saved default if none given)"
+    echo "  predator-mode -s              Show current profile"
+    echo "  predator-mode -l              List available profiles"
+    echo "  predator-mode -d [profile]    Set a new default profile"
+    echo "  predator-mode -h              Show this help"
+}
+
+show_status() {
+    CURRENT=$(cat "$PROFILE_PATH")
+    DEFAULT=$(get_default)
+    echo -e "Current profile: ${GREEN}${BOLD}${CURRENT}${NC}"
+    echo -e "Default profile: ${CYAN}${DEFAULT}${NC}"
+}
+
+show_list() {
+    CURRENT=$(cat "$PROFILE_PATH")
+    DEFAULT=$(get_default)
+    echo -e "${BOLD}Available profiles:${NC}"
+    for p in $AVAILABLE; do
+        LINE="    $p"
+        [ "$p" = "$CURRENT" ] && LINE="${GREEN}  ▶ $p (active)${NC}"
+        [ "$p" = "$DEFAULT" ] && LINE="${LINE} ${YELLOW}[default]${NC}"
+        echo -e "$LINE"
+    done
+}
+
+set_default() {
+    local PROFILE="$1"
+
+    if ! echo "$AVAILABLE" | grep -qw "$PROFILE"; then
+        echo -e "${RED}Error:${NC} '$PROFILE' is not a valid profile."
+        echo -e "Run ${CYAN}predator-mode -l${NC} to see available profiles."
+        exit 1
+    fi
+
+    mkdir -p "$CONFIG_DIR"
+    echo "default=${PROFILE}" > "$CONFIG_FILE"
+    echo -e "Default profile set to: ${CYAN}${BOLD}${PROFILE}${NC}"
+    echo -e "The systemd service will use this on next login."
+}
+
+set_profile() {
+    local PROFILE="$1"
+
+    if ! echo "$AVAILABLE" | grep -qw "$PROFILE"; then
+        echo -e "${RED}Error:${NC} '$PROFILE' is not a valid profile."
+        echo -e "Run ${CYAN}predator-mode -l${NC} to see available profiles."
+        exit 1
+    fi
+
+    if echo "$PROFILE" | sudo tee "$PROFILE_PATH" > /dev/null; then
+        echo -e "Profile set to: ${GREEN}${BOLD}${PROFILE}${NC}"
+    else
+        echo -e "${RED}Error:${NC} Failed to set profile. Check your sudoers rule."
+        exit 1
+    fi
+}
+
+case "${1}" in
+    -h|--help)    show_help ;;
+    -s|--status)  show_status ;;
+    -l|--list)    show_list ;;
+    -d|--default)
+        if [ -z "$2" ]; then
+            echo -e "Current default: ${CYAN}$(get_default)${NC}"
+        else
+            set_default "$2"
+        fi
+        ;;
+    "") set_profile "$(get_default)" ;;
+    *)  set_profile "$1" ;;
+esac
