@@ -1,7 +1,7 @@
 #!/bin/bash
 
 PROFILE_PATH="/sys/firmware/acpi/platform_profile"
-AVAILABLE=$(cat "${PROFILE_PATH}_choices" 2>/dev/null)
+PROFILE_CHOICES="${PROFILE_PATH}_choices"
 CONFIG_DIR="${HOME}/.config/predator-mode"
 CONFIG_FILE="${CONFIG_DIR}/config"
 
@@ -13,11 +13,39 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
+# Check sysfs interface exists
+if [ ! -f "$PROFILE_PATH" ]; then
+    echo -e "${RED}Error:${NC} ACPI platform_profile interface not found."
+    echo "Your kernel may not support platform profiles."
+    exit 1
+fi
+
+AVAILABLE=$(cat "$PROFILE_CHOICES" 2>/dev/null)
+
 get_default() {
+    local DEFAULT="balanced-performance"
     if [ -f "$CONFIG_FILE" ]; then
-        grep -m1 "^default=" "$CONFIG_FILE" | cut -d'=' -f2
-    else
-        echo "balanced-performance"
+        local SAVED
+        SAVED=$(grep -m1 "^default=" "$CONFIG_FILE" | cut -d'=' -f2)
+        # Validate saved value against available profiles
+        if [ -n "$SAVED" ] && echo "$AVAILABLE" | grep -qw "$SAVED"; then
+            DEFAULT="$SAVED"
+        elif [ -n "$SAVED" ]; then
+            echo -e "${YELLOW}Warning:${NC} Saved default '$SAVED' is not a valid profile. Falling back to 'balanced-performance'." >&2
+        fi
+    fi
+    echo "$DEFAULT"
+}
+
+notify() {
+    local PROFILE="$1"
+    if command -v notify-send &>/dev/null; then
+        notify-send \
+            --app-name="predator-mode" \
+            --icon=battery-symbolic \
+            --urgency=low \
+            --expire-time=2000 \
+            "Power Profile" "Switched to: ${PROFILE}"
     fi
 }
 
@@ -26,10 +54,14 @@ show_help() {
     echo ""
     echo -e "${BOLD}Usage:${NC}"
     echo "  predator-mode [profile]       Set a profile (uses saved default if none given)"
-    echo "  predator-mode -s              Show current profile"
+    echo "  predator-mode -c              Cycle to the next profile"
+    echo "  predator-mode -s              Show current and default profile"
     echo "  predator-mode -l              List available profiles"
-    echo "  predator-mode -d [profile]    Set a new default profile"
+    echo "  predator-mode -d [profile]    Set or show default profile"
     echo "  predator-mode -h              Show this help"
+    echo ""
+    echo -e "${BOLD}Available profiles:${NC}"
+    for p in $AVAILABLE; do echo "  $p"; done
 }
 
 show_status() {
@@ -44,11 +76,36 @@ show_list() {
     DEFAULT=$(get_default)
     echo -e "${BOLD}Available profiles:${NC}"
     for p in $AVAILABLE; do
-        LINE="    $p"
-        [ "$p" = "$CURRENT" ] && LINE="${GREEN}  ▶ $p (active)${NC}"
-        [ "$p" = "$DEFAULT" ] && LINE="${LINE} ${YELLOW}[default]${NC}"
-        echo -e "$LINE"
+        if [ "$p" = "$CURRENT" ] && [ "$p" = "$DEFAULT" ]; then
+            echo -e "${GREEN}  ▶ $p${NC} ${YELLOW}[active · default]${NC}"
+        elif [ "$p" = "$CURRENT" ]; then
+            echo -e "${GREEN}  ▶ $p [active]${NC}"
+        elif [ "$p" = "$DEFAULT" ]; then
+            echo -e "    $p ${YELLOW}[default]${NC}"
+        else
+            echo "    $p"
+        fi
     done
+}
+
+cycle_profile() {
+    CURRENT=$(cat "$PROFILE_PATH")
+    PROFILES=($AVAILABLE)
+    COUNT=${#PROFILES[@]}
+    NEXT=""
+
+    for i in "${!PROFILES[@]}"; do
+        if [ "${PROFILES[$i]}" = "$CURRENT" ]; then
+            NEXT="${PROFILES[$(( (i + 1) % COUNT ))]}"
+            break
+        fi
+    done
+
+    if [ -z "$NEXT" ]; then
+        NEXT="${PROFILES[0]}"
+    fi
+
+    set_profile "$NEXT"
 }
 
 set_default() {
@@ -77,6 +134,7 @@ set_profile() {
 
     if echo "$PROFILE" | sudo tee "$PROFILE_PATH" > /dev/null; then
         echo -e "Profile set to: ${GREEN}${BOLD}${PROFILE}${NC}"
+        notify "$PROFILE"
     else
         echo -e "${RED}Error:${NC} Failed to set profile. Check your sudoers rule."
         exit 1
@@ -87,6 +145,7 @@ case "${1}" in
     -h|--help)    show_help ;;
     -s|--status)  show_status ;;
     -l|--list)    show_list ;;
+    -c|--cycle)   cycle_profile ;;
     -d|--default)
         if [ -z "$2" ]; then
             echo -e "Current default: ${CYAN}$(get_default)${NC}"
