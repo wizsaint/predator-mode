@@ -4,6 +4,8 @@ PROFILE_PATH="/sys/firmware/acpi/platform_profile"
 PROFILE_CHOICES="${PROFILE_PATH}_choices"
 CONFIG_DIR="${HOME}/.config/predator-mode"
 CONFIG_FILE="${CONFIG_DIR}/config"
+SCRIPT_PATH="$(realpath "$0")"
+REPO_RAW="https://raw.githubusercontent.com/wizsaint/predator-mode/main"
 
 # Colors
 RED='\033[0;31m'
@@ -13,12 +15,18 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-# Check sysfs interface exists
-if [ ! -f "$PROFILE_PATH" ]; then
-    echo -e "${RED}Error:${NC} ACPI platform_profile interface not found."
-    echo "Your kernel may not support platform profiles."
-    exit 1
-fi
+# Check sysfs interface exists (skip for non-profile commands)
+case "${1}" in
+    enable|disable|service|update|-h|--help)
+        ;;
+    *)
+        if [ ! -f "$PROFILE_PATH" ]; then
+            echo -e "${RED}Error:${NC} ACPI platform_profile interface not found."
+            echo "Your kernel may not support platform profiles."
+            exit 1
+        fi
+        ;;
+esac
 
 AVAILABLE=$(cat "$PROFILE_CHOICES" 2>/dev/null)
 
@@ -27,7 +35,6 @@ get_default() {
     if [ -f "$CONFIG_FILE" ]; then
         local SAVED
         SAVED=$(grep -m1 "^default=" "$CONFIG_FILE" | cut -d'=' -f2)
-        # Validate saved value against available profiles
         if [ -n "$SAVED" ] && echo "$AVAILABLE" | grep -qw "$SAVED"; then
             DEFAULT="$SAVED"
         elif [ -n "$SAVED" ]; then
@@ -52,12 +59,20 @@ notify() {
 show_help() {
     echo -e "${BOLD}predator-mode${NC} — Acer Predator platform profile switcher"
     echo ""
-    echo -e "${BOLD}Usage:${NC}"
+    echo -e "${BOLD}Profile commands:${NC}"
     echo "  predator-mode [profile]       Set a profile (uses saved default if none given)"
     echo "  predator-mode -c              Cycle to the next profile"
     echo "  predator-mode -s              Show current and default profile"
     echo "  predator-mode -l              List available profiles"
     echo "  predator-mode -d [profile]    Set or show default profile"
+    echo ""
+    echo -e "${BOLD}Service commands:${NC}"
+    echo "  predator-mode enable          Enable and start the login service"
+    echo "  predator-mode disable         Disable and stop the login service"
+    echo "  predator-mode service         Show service status"
+    echo ""
+    echo -e "${BOLD}Other:${NC}"
+    echo "  predator-mode update          Update to the latest version from GitHub"
     echo "  predator-mode -h              Show this help"
     echo ""
     echo -e "${BOLD}Available profiles:${NC}"
@@ -101,10 +116,7 @@ cycle_profile() {
         fi
     done
 
-    if [ -z "$NEXT" ]; then
-        NEXT="${PROFILES[0]}"
-    fi
-
+    [ -z "$NEXT" ] && NEXT="${PROFILES[0]}"
     set_profile "$NEXT"
 }
 
@@ -141,6 +153,52 @@ set_profile() {
     fi
 }
 
+service_enable() {
+    systemctl --user enable --now predator-profile.service \
+        && echo -e "  ${GREEN}✔${NC} Service enabled and started" \
+        || echo -e "  ${RED}✘${NC} Failed to enable service"
+}
+
+service_disable() {
+    systemctl --user disable --now predator-profile.service \
+        && echo -e "  ${GREEN}✔${NC} Service disabled and stopped" \
+        || echo -e "  ${RED}✘${NC} Failed to disable service"
+}
+
+service_status() {
+    systemctl --user status predator-profile.service --no-pager -l
+}
+
+self_update() {
+    echo -e "Checking for updates..."
+
+    local TMP
+    TMP=$(mktemp)
+
+    if ! curl -fsSL "${REPO_RAW}/predator-mode" -o "$TMP"; then
+        rm -f "$TMP"
+        echo -e "${RED}Error:${NC} Failed to download update. Check your internet connection."
+        exit 1
+    fi
+
+    # Validate the downloaded file looks like our script
+    if ! head -1 "$TMP" | grep -q "#!/bin/bash"; then
+        rm -f "$TMP"
+        echo -e "${RED}Error:${NC} Downloaded file doesn't look valid. Aborting."
+        exit 1
+    fi
+
+    # Backup current version
+    cp "$SCRIPT_PATH" "${SCRIPT_PATH}.bak"
+
+    # Replace in place
+    chmod +x "$TMP"
+    mv "$TMP" "$SCRIPT_PATH"
+
+    echo -e "  ${GREEN}✔${NC} Updated successfully: ${SCRIPT_PATH}"
+    echo -e "  ${CYAN}ℹ${NC}  Previous version backed up to: ${SCRIPT_PATH}.bak"
+}
+
 case "${1}" in
     -h|--help)    show_help ;;
     -s|--status)  show_status ;;
@@ -153,6 +211,10 @@ case "${1}" in
             set_default "$2"
         fi
         ;;
-    "") set_profile "$(get_default)" ;;
-    *)  set_profile "$1" ;;
+    enable)       service_enable ;;
+    disable)      service_disable ;;
+    service)      service_status ;;
+    update)       self_update ;;
+    "")           set_profile "$(get_default)" ;;
+    *)            set_profile "$1" ;;
 esac
