@@ -5,12 +5,11 @@
 # Supports Fedora (KDE) and CachyOS / any Arch-based distro
 # =============================================================================
 
-VERSION="1.1.0"
+VERSION="1.2.0"
 REPO_RAW="https://raw.githubusercontent.com/wizsaint/predator-mode/main"
 
 set -e
 
-# Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
@@ -18,7 +17,6 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-# Paths
 SCRIPT_NAME="predator-mode"
 INSTALL_DIR="${HOME}/.local/bin"
 SCRIPT_PATH="${INSTALL_DIR}/${SCRIPT_NAME}"
@@ -32,9 +30,7 @@ PROFILE_CHOICES="${PROFILE_PATH}_choices"
 STEPS_TOTAL=5
 STEP=0
 
-# =============================================================================
-# Helpers
-# =============================================================================
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 print_header() {
     echo ""
@@ -66,9 +62,7 @@ detect_shell() {
     basename "$(getent passwd "$USER" | cut -d: -f7)"
 }
 
-# =============================================================================
-# Step 1 — Compatibility check
-# =============================================================================
+# ── Step 1 — Compatibility check ──────────────────────────────────────────────
 
 check_compatibility() {
     step "Checking system compatibility"
@@ -78,6 +72,7 @@ check_compatibility() {
     fi
     ok "ACPI platform_profile interface found"
 
+    local AVAILABLE
     AVAILABLE=$(cat "$PROFILE_CHOICES" 2>/dev/null)
     if [ -z "$AVAILABLE" ]; then
         fail "Could not read platform_profile_choices."
@@ -85,7 +80,7 @@ check_compatibility() {
     ok "Available profiles: ${AVAILABLE}"
 
     if ! echo "$AVAILABLE" | grep -qw "balanced-performance"; then
-        warn "'balanced-performance' not found in profile list — default will fall back to 'balanced'"
+        warn "'balanced-performance' not in profile list — default will fall back to 'balanced'"
     fi
 
     if ! sudo -v 2>/dev/null; then
@@ -98,16 +93,13 @@ check_compatibility() {
         ok "Detected OS: ${PRETTY_NAME}"
     fi
 
-    # Check curl is available (needed for script download)
     if ! command -v curl &>/dev/null; then
         fail "curl is required but not installed. Install it and re-run."
     fi
     ok "curl found"
 }
 
-# =============================================================================
-# Step 2 — Download and install the predator-mode script
-# =============================================================================
+# ── Step 2 — Download and install the predator-mode script ───────────────────
 
 install_script() {
     step "Downloading predator-mode script from GitHub"
@@ -123,7 +115,6 @@ install_script() {
     chmod +x "$SCRIPT_PATH"
     ok "Script downloaded and installed: ${SCRIPT_PATH}"
 
-    # Detect actual login shell for correct PATH advice
     local SHELL_NAME
     SHELL_NAME=$(detect_shell)
 
@@ -139,9 +130,7 @@ install_script() {
     fi
 }
 
-# =============================================================================
-# Step 3 — Install sudoers rule
-# =============================================================================
+# ── Step 3 — Install sudoers rule ─────────────────────────────────────────────
 
 install_sudoers() {
     step "Installing sudoers rule"
@@ -165,9 +154,7 @@ install_sudoers() {
     ok "Rule: ${SUDOERS_LINE}"
 }
 
-# =============================================================================
-# Step 4 — Install systemd user service
-# =============================================================================
+# ── Step 4 — Install systemd user service ────────────────────────────────────
 
 install_service() {
     step "Installing systemd user service"
@@ -193,11 +180,9 @@ EOF
     ok "Service file installed: ${SERVICE_FILE}"
 }
 
-# =============================================================================
-# Step 5 — Enable and start the service
-# =============================================================================
+# ── Step 5 — Enable and start the service ────────────────────────────────────
 
-enable_service() {
+activate_service() {
     step "Enabling systemd user service"
 
     systemctl --user daemon-reload
@@ -207,15 +192,14 @@ enable_service() {
 
     ok "Service enabled and started"
 
-    sleep 2
+    # Wait for service ExecStartPre (2s) + execution to complete
+    sleep 3
     local CURRENT
     CURRENT=$(cat "$PROFILE_PATH" 2>/dev/null)
     ok "Current profile: ${CURRENT}"
 }
 
-# =============================================================================
-# Summary
-# =============================================================================
+# ── Summary ───────────────────────────────────────────────────────────────────
 
 print_summary() {
     echo ""
@@ -231,6 +215,10 @@ print_summary() {
     echo "  predator-mode -l           List all profiles"
     echo "  predator-mode -s           Show current + default"
     echo "  predator-mode -d [profile] Set a new default"
+    echo "  predator-mode --enable     Enable login service"
+    echo "  predator-mode --disable    Disable login service"
+    echo "  predator-mode --service    Show service status"
+    echo "  predator-mode --update     Update to latest version"
     echo "  predator-mode -h           Help"
     echo ""
     echo -e "${BOLD}Service status:${NC}"
@@ -239,9 +227,7 @@ print_summary() {
     echo ""
 }
 
-# =============================================================================
-# Uninstall
-# =============================================================================
+# ── Uninstall ─────────────────────────────────────────────────────────────────
 
 uninstall() {
     echo -e "\n${YELLOW}${BOLD}Uninstalling predator-mode...${NC}\n"
@@ -269,9 +255,7 @@ uninstall() {
     exit 0
 }
 
-# =============================================================================
-# Entry point
-# =============================================================================
+# ── Entry point ───────────────────────────────────────────────────────────────
 
 case "${1}" in
     --uninstall|-u)
@@ -296,7 +280,7 @@ case "${1}" in
         install_script
         install_sudoers
         install_service
-        enable_service
+        activate_service
         print_summary
         ;;
     *)
