@@ -1,299 +1,124 @@
 # predator-mode
 
-A power profile manager for the **Acer Predator Helios Neo 16** on Linux. Exposes all five ACPI platform profiles through a simple CLI, with automatic profile setting on login via a systemd user service.
+Switch between all five ACPI power profiles on the **Acer Predator Helios Neo 16** from Linux, and have your preferred one applied automatically at login.
 
----
+## Why
 
-## Background
-
-Linux desktop environments (KDE, GNOME) use `power-profiles-daemon`, which hardcodes only three profiles:
-
-| DE Label | → `platform_profile` |
-|---|---|
-| Power Saver | `low-power` |
-| Balanced | `balanced` |
-| Performance | `performance` (turbo, uncapped fans) |
-
-The Predator Helios Neo 16 exposes **five** profiles at the kernel level:
+KDE and GNOME talk to `power-profiles-daemon`, which only knows three profiles. The Predator exposes five at the kernel level:
 
 ```
 low-power  quiet  balanced  balanced-performance  performance
 ```
 
-`balanced-performance` (moderate fan curve, power unlocked but capped) is inaccessible from any standard DE widget, and clicking "Performance" in KDE activates full turbo mode. This tool solves both problems.
+Clicking "Performance" in the desktop widget selects `performance` (turbo, fans fully uncapped). `balanced-performance` (power unlocked, moderate fan curve) can't be reached from the widget at all. `predator-mode` fills that gap.
 
----
-
-## Features
-
-- Switch between all 5 ACPI platform profiles from the terminal
-- Cycle through profiles in sequence — bind to a keyboard shortcut
-- Desktop notifications on profile switch via `notify-send` (if installed)
-- Persistent default profile — applied automatically on login via a systemd user service
-- Config validation with safe fallback on invalid values
-- Self-update from GitHub with a single flag
-
----
-
-## Requirements
-
-- Linux kernel with ACPI `platform_profile` support (5.9+)
-- `systemd` (user session)
-- `sudo`
-- `bash`
-- `curl` (for the installer and `--update`)
-
-Optional:
-- `libnotify` / `notify-send` — desktop notifications on profile switch
-
-Tested on:
-- **Fedora 44 / 45, KDE Plasma**
-- **CachyOS (Arch-based), KDE Plasma**
-
----
-
-## Installation
-
-### Option A — Installer script (recommended)
+## Install and update
 
 ```bash
-curl -O https://raw.githubusercontent.com/wizsaint/predator-mode/main/install-predator-mode.sh
-chmod +x install-predator-mode.sh
-./install-predator-mode.sh
+curl -fsSLO https://raw.githubusercontent.com/wizsaint/predator-mode/main/install-predator-mode.sh
+bash install-predator-mode.sh
 ```
 
-The installer will:
-1. Verify your system exposes the ACPI `platform_profile` interface
-2. Download and install `predator-mode` to `~/.local/bin/`
-3. Add a scoped sudoers rule for passwordless profile switching
-4. Install and enable a systemd user service that applies your default profile after every login
+The same two commands install, update and repair. The installer compares each component with what's already on your system and only touches what differs:
 
-Other installer flags:
+| Component | Location | What the installer does |
+|---|---|---|
+| Script | `~/.local/bin/predator-mode` | Installs it, or replaces it if the content changed (old copy kept as `.bak`) |
+| Sudoers rule | `/etc/sudoers.d/platform_profile` | Creates or repairs it, syntax-checked before it goes live |
+| Login service | `~/.config/systemd/user/predator-profile.service` | Creates or repairs it, then enables it on a fresh install |
+
+It explains what it finds and what it's doing at every step, and it never resets your current profile, your saved default, or a login service you turned off.
+
+To remove everything: `bash install-predator-mode.sh --uninstall`
+
+Requires Linux 5.12+ (when ACPI platform profiles landed), systemd, sudo, curl. Run it as your normal user, not as root.
+
+## Usage
 
 ```bash
-./install-predator-mode.sh --uninstall   # remove everything
-./install-predator-mode.sh --version     # print installer version
-./install-predator-mode.sh --help        # show usage
+predator-mode                  # apply your saved default
+predator-mode quiet            # switch to a profile
+predator-mode -c               # cycle to the next profile
+predator-mode -l               # list profiles (active and default marked)
+predator-mode -s               # current profile, default, login service state
+predator-mode -d quiet         # save a new default (applied at next login)
+predator-mode -d               # show the saved default
+predator-mode --enable         # enable the login service
+predator-mode --disable        # disable it
+predator-mode -v               # version
 ```
 
-The uninstaller prompts whether to also remove your saved config (`~/.config/predator-mode/`).
+| Profile | Behaviour |
+|---|---|
+| `low-power` | Maximum battery saving |
+| `quiet` | Reduced power, minimal fan noise |
+| `balanced` | What KDE sets by default |
+| `balanced-performance` | Power unlocked, moderate fan curve |
+| `performance` | Turbo, fans fully uncapped |
 
----
+**Keyboard shortcut:** bind `~/.local/bin/predator-mode -c` in System Settings → Shortcuts → Custom Shortcuts. With `libnotify` installed (`notify-send`), each switch shows a notification.
 
-### Option B — Manual installation
+## Manual install
 
-#### Step 1 — Verify your system
-
-```bash
-cat /sys/firmware/acpi/platform_profile_choices
-```
-
-You should see the 5 profiles. If the file doesn't exist, your kernel doesn't support this interface.
-
-#### Step 2 — Install the script
+If you'd rather not run the installer:
 
 ```bash
-mkdir -p ~/.local/bin
-curl -fsSL https://raw.githubusercontent.com/wizsaint/predator-mode/main/predator-mode \
-  -o ~/.local/bin/predator-mode
+mkdir -p ~/.local/bin ~/.config/systemd/user
+curl -fsSL https://raw.githubusercontent.com/wizsaint/predator-mode/main/predator-mode -o ~/.local/bin/predator-mode
 chmod +x ~/.local/bin/predator-mode
 ```
 
-Make sure `~/.local/bin` is in your PATH:
-
-**bash / zsh:**
-```bash
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc   # or ~/.zshrc
-source ~/.bashrc
-```
-
-**fish:**
-```fish
-fish_add_path ~/.local/bin
-```
-
-#### Step 3 — Sudoers rule
+Add the sudoers rule (replace `yourusername`):
 
 ```bash
 sudo visudo -f /etc/sudoers.d/platform_profile
 ```
-
-Add this line, replacing `yourusername` with your actual username:
-
 ```
-yourusername ALL=(ALL) NOPASSWD: /usr/bin/tee /sys/firmware/acpi/platform_profile
+yourusername ALL=(root) NOPASSWD: /usr/bin/tee /sys/firmware/acpi/platform_profile
 ```
 
-> This rule is narrowly scoped — it only permits `tee` writing to that exact sysfs file. The kernel further restricts writes to the predefined profile names only.
-
-#### Step 4 — Systemd user service
-
-```bash
-mkdir -p ~/.config/systemd/user
-```
-
-Create `~/.config/systemd/user/predator-profile.service`:
+Create `~/.config/systemd/user/predator-profile.service` (`%h` is your home directory):
 
 ```ini
 [Unit]
-Description=Set Predator power profile after login
+Description=Apply the default Predator power profile after login
 After=graphical-session.target
 
 [Service]
 Type=oneshot
 ExecStartPre=/bin/sleep 2
-ExecStart=/home/yourusername/.local/bin/predator-mode
+ExecStart=%h/.local/bin/predator-mode
 RemainAfterExit=yes
 
 [Install]
 WantedBy=graphical-session.target
 ```
 
-Enable and start:
-
 ```bash
 systemctl --user daemon-reload
 systemctl --user enable --now predator-profile.service
 ```
 
----
-
-## Usage
-
-### Profile switching
-
-```bash
-predator-mode                  # apply your saved default profile
-predator-mode quiet            # switch to a specific profile
-predator-mode -c               # cycle to the next profile in sequence
-predator-mode -l               # list all profiles (shows active and default)
-predator-mode -s               # show current and default profile
-predator-mode -d balanced      # save a new default profile
-predator-mode -d               # print current default without changing it
-predator-mode -h               # show help
-```
-
-### Service management
-
-```bash
-predator-mode --enable         # enable and start the login service
-predator-mode --disable        # disable and stop the login service
-predator-mode --service        # show full service status
-```
-
-### Updates
-
-```bash
-predator-mode --update         # download and install the latest version from GitHub
-```
-
-Backs up the current version to `predator-mode.bak` before replacing it.
-
----
-
-## Profile reference
-
-| Profile | Behaviour |
-|---|---|
-| `low-power` | Maximum battery saving, lowest performance |
-| `quiet` | Minimal fan noise, reduced power |
-| `balanced` | Default OS balance (set by KDE on boot) |
-| `balanced-performance` | Performance unlocked, fan curve moderate |
-| `performance` | Turbo mode, fan fully uncapped |
-
----
-
-## Keyboard shortcut (cycle profiles)
-
-The `-c` flag cycles profiles in sequence, making it ideal for a keyboard shortcut.
-
-**KDE:** System Settings → Shortcuts → Custom Shortcuts → New → Global Shortcut → Command/URL
-
-Set the command to:
-
-```
-/home/yourusername/.local/bin/predator-mode -c
-```
-
-Each press cycles to the next profile and sends a desktop notification showing the new profile name (requires `libnotify`).
-
----
-
-## Desktop notifications
-
-`predator-mode` sends a desktop notification via `notify-send` on every profile switch. Notifications are silently skipped if `notify-send` is not installed.
-
-**Fedora:**
-```bash
-sudo dnf install libnotify
-```
-
-**CachyOS / Arch:**
-```bash
-sudo pacman -S libnotify
-```
-
----
-
-## Changing the default profile
-
-```bash
-predator-mode -d quiet
-```
-
-Saves `quiet` to `~/.config/predator-mode/config`. The systemd service reads this on every login. If the saved value is ever invalid, the script warns and falls back to `balanced-performance`.
-
----
+To update a manual install, repeat the `curl` line.
 
 ## How it works
 
-The Linux kernel exposes a sysfs file at `/sys/firmware/acpi/platform_profile`. Writing a valid profile name to it switches the hardware immediately:
+Writing a profile name to `/sys/firmware/acpi/platform_profile` switches the hardware immediately. That file is root-only, so the sudoers rule allows exactly one thing without a password: `tee` writing to that file. The kernel rejects any value it doesn't know.
 
-```bash
-echo "balanced-performance" | sudo tee /sys/firmware/acpi/platform_profile
-```
-
-`predator-mode` wraps this with validation, a config-based default, and a systemd user service that fires after login — after `power-profiles-daemon` has initialized — so the profile isn't overwritten by the DE.
-
-The sudoers rule allows the script to write to that specific sysfs file without a password prompt, which is required for the systemd user service (which runs as your user, not root) to work correctly.
-
----
+The service runs after login rather than at boot because the desktop's power management applies its own profile during startup and would overwrite an earlier setting.
 
 ## Troubleshooting
 
-**`predator-mode: command not found`**
-`~/.local/bin` is not in your PATH. See Step 2 in the manual installation section.
-
-**`Failed to set profile. Check your sudoers rule.`**
-The sudoers rule is missing or incorrect. Re-run Step 3.
-
-**Profile resets to `balanced` after login**
-The service isn't running. Check with `predator-mode --service` and re-enable with `predator-mode --enable`.
-
-**Service shows `preset: disabled` on Fedora**
-Expected — Fedora's systemd preset policy doesn't auto-enable user services. The installer explicitly enables it so this has no effect on functionality. Verify with:
-```bash
-systemctl --user is-enabled predator-profile.service   # should print: enabled
-```
-
-**No desktop notifications**
-Install `libnotify`. See the Desktop notifications section above.
-
-**Warning: Saved default is not a valid profile**
-Your `~/.config/predator-mode/config` contains an unrecognised profile name. Reset it with:
-```bash
-predator-mode -d balanced-performance
-```
-
----
+- **`predator-mode: command not found`**: `~/.local/bin` isn't on your PATH. bash/zsh: add `export PATH="$HOME/.local/bin:$PATH"` to `~/.bashrc` / `~/.zshrc`. fish: `fish_add_path ~/.local/bin`.
+- **"could not write to /sys/firmware/acpi/platform_profile"**: the sudoers rule is missing. Re-run the installer.
+- **Profile is `balanced` after login**: check `predator-mode -s`. If the login service shows `disabled` or `not installed`, run `predator-mode --enable` or re-run the installer.
+- **`preset: disabled` in `systemctl --user status` on Fedora**: normal. The installer enables the service explicitly; confirm with `systemctl --user is-enabled predator-profile.service`.
+- **"saved default … is not available"**: your config names a profile this machine doesn't offer. Fix it with `predator-mode -d balanced-performance`.
 
 ## Limitations
 
-- Profiles available depend entirely on what the hardware and firmware expose. Only tested on the Predator Helios Neo 16.
-- `power-profiles-daemon` (KDE/GNOME battery widget) will still show "Balanced" even when `balanced-performance` is active — there is no upstream config file to remap this. A [feature request has been filed](https://gitlab.freedesktop.org/upower/power-profiles-daemon).
-
----
+Only tested on the Predator Helios Neo 16 (Fedora 44/45 and CachyOS, KDE Plasma). The KDE/GNOME power widget keeps showing "Balanced" while `balanced-performance` is active, because `power-profiles-daemon` has no way to remap its profiles.
 
 ## License
 
-MIT
+MIT, see [LICENSE](LICENSE).
