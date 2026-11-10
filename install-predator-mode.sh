@@ -7,7 +7,8 @@
 #
 # Safe to re-run. Each component (script, sudoers rule, login service) is compared
 # with what is installed and only touched if it differs, so re-running the
-# installer *is* the update. Settings and the login-service on/off choice are kept.
+# installer *is* the update. The login service is installed but never switched on
+# or off for you; enable it yourself with: predator-mode --enable
 
 set -eu
 
@@ -288,15 +289,11 @@ apply() {
         CHANGED="$CHANGED service"
     fi
 
-    # Enablement: switch on for a fresh install; otherwise respect the user's choice
-    if [ "$UNIT_STATE" = missing ]; then
-        act "systemctl --user enable --now $UNIT_NAME   (applies your default profile now, takes ~2s)"
-        systemctl --user enable --now "$UNIT_NAME"
-        ok "login service enabled and started"
-    elif [ "$ENABLED_STATE" = enabled ]; then
-        ok "login service already enabled"
+    # Opt-in: the installer never switches the login service on or off
+    if [ "$ENABLED_STATE" = enabled ]; then
+        ok "login service is enabled (left as it is)"
     else
-        note "login service is '${ENABLED_STATE:-not enabled}'; left as it is (turn it on with: predator-mode --enable)"
+        note "login service is not enabled (opt-in). Turn it on with: predator-mode --enable"
     fi
 }
 
@@ -307,7 +304,7 @@ summary() {
     else
         ok "changed:$CHANGED"
     fi
-    if [ "$BIN_STATE" != current ] && [ "$UNIT_STATE" != missing ]; then
+    if [ -n "$CHANGED" ]; then
         note "your current power profile was not touched"
     fi
 
