@@ -1,227 +1,192 @@
 #!/bin/bash
+# predator-mode — ACPI platform profile switcher for the Acer Predator Helios Neo 16
+# https://github.com/wizsaint/predator-mode
+#
+# Installing and updating is the installer's job (install-predator-mode.sh).
+# This script only switches profiles and manages the login service.
+
+VERSION="2.0.0"
 
 PROFILE_PATH="/sys/firmware/acpi/platform_profile"
-PROFILE_CHOICES="${PROFILE_PATH}_choices"
-CONFIG_DIR="${HOME}/.config/predator-mode"
-CONFIG_FILE="${CONFIG_DIR}/config"
-SCRIPT_PATH="$(realpath "$0")"
-REPO_RAW="https://raw.githubusercontent.com/wizsaint/predator-mode/main"
+CONFIG_FILE="$HOME/.config/predator-mode/config"
+SERVICE="predator-profile.service"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-CYAN='\033[0;36m'
-BOLD='\033[1m'
-NC='\033[0m'
+AVAILABLE=$(cat "${PROFILE_PATH}_choices" 2>/dev/null)
 
-# Skip sysfs check for flags that don't need it
-case "${1}" in
-    --enable|--disable|--service|--update|-h|--help) ;;
-    *)
-        if [ ! -f "$PROFILE_PATH" ]; then
-            echo -e "${RED}Error:${NC} ACPI platform_profile interface not found."
-            echo "Your kernel may not support platform profiles."
-            exit 1
-        fi
-        ;;
-esac
+# Colour only when a person is looking (not in logs, pipes or the login service)
+BOLD='' GREEN='' YELLOW='' CYAN='' RED='' NC=''
+if [ -z "${NO_COLOR:-}" ] && [ -t 1 ] && [ -t 2 ]; then
+    BOLD=$'\033[1m' GREEN=$'\033[32m' YELLOW=$'\033[33m'
+    CYAN=$'\033[36m' RED=$'\033[31m' NC=$'\033[0m'
+fi
 
-AVAILABLE=$(cat "$PROFILE_CHOICES" 2>/dev/null)
+err()  { echo "${RED}Error:${NC} $*" >&2; }
+warn() { echo "${YELLOW}Warning:${NC} $*" >&2; }
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+# ── Profiles ──────────────────────────────────────────────────────────────────
+
+# Exact match only: a substring match would accept "power" because of "low-power"
+is_valid() {
+    local p
+    for p in $AVAILABLE; do
+        [ "$p" = "$1" ] && return 0
+    done
+    return 1
+}
+
+require_valid() {
+    is_valid "$1" && return 0
+    err "'$1' is not a valid profile."
+    echo "Available: $AVAILABLE" >&2
+    exit 1
+}
+
+get_current() { cat "$PROFILE_PATH"; }
 
 get_default() {
-    local DEFAULT="balanced-performance"
-    if [ -f "$CONFIG_FILE" ]; then
-        local SAVED
-        SAVED=$(grep -m1 "^default=" "$CONFIG_FILE" | cut -d'=' -f2)
-        if [ -n "$SAVED" ] && echo "$AVAILABLE" | grep -qw "$SAVED"; then
-            DEFAULT="$SAVED"
-        elif [ -n "$SAVED" ]; then
-            echo -e "${YELLOW}Warning:${NC} Saved default '$SAVED' is not a valid profile. Falling back to 'balanced-performance'." >&2
-        fi
+    local saved="" fallback=balanced
+    is_valid balanced-performance && fallback=balanced-performance
+    [ -r "$CONFIG_FILE" ] && saved=$(grep -m1 '^default=' "$CONFIG_FILE" | cut -d= -f2-)
+    if [ -z "$saved" ]; then
+        echo "$fallback"
+    elif is_valid "$saved"; then
+        echo "$saved"
+    else
+        warn "saved default '$saved' is not available on this machine; using '$fallback'."
+        echo "$fallback"
     fi
-    echo "$DEFAULT"
 }
 
 notify() {
-    if command -v notify-send &>/dev/null; then
-        notify-send \
-            --app-name="predator-mode" \
-            --icon=battery-symbolic \
-            --urgency=low \
-            --expire-time=2000 \
-            "Power Profile" "Switched to: ${1}"
+    command -v notify-send >/dev/null 2>&1 || return 0
+    notify-send --app-name=predator-mode --icon=battery-symbolic \
+        --urgency=low --expire-time=2000 \
+        "Power Profile" "Switched to: $1" 2>/dev/null || true
+}
+
+set_profile() {
+    require_valid "$1"
+    # -n: never prompt. Without the sudoers rule this fails fast instead of hanging.
+    if sudo -n tee "$PROFILE_PATH" <<<"$1" >/dev/null 2>&1; then
+        echo "Profile set to: ${GREEN}${BOLD}$1${NC}"
+        notify "$1"
+    else
+        err "could not write to $PROFILE_PATH."
+        echo "The sudoers rule is probably missing. Re-run the installer to repair it." >&2
+        exit 1
     fi
 }
 
-# ── Profile commands ──────────────────────────────────────────────────────────
-
-show_help() {
-    echo -e "${BOLD}predator-mode${NC} — Acer Predator platform profile switcher"
-    echo ""
-    echo -e "${BOLD}Profile:${NC}"
-    echo "  predator-mode [profile]    Set a profile (uses saved default if none given)"
-    echo "  predator-mode -c           Cycle to the next profile"
-    echo "  predator-mode -l           List available profiles"
-    echo "  predator-mode -s           Show current and default profile"
-    echo "  predator-mode -d [profile] Set or show default profile"
-    echo ""
-    echo -e "${BOLD}Service:${NC}"
-    echo "  predator-mode --enable     Enable and start the login service"
-    echo "  predator-mode --disable    Disable and stop the login service"
-    echo "  predator-mode --service    Show service status"
-    echo ""
-    echo -e "${BOLD}Other:${NC}"
-    echo "  predator-mode --update     Update to the latest version from GitHub"
-    echo "  predator-mode -h           Show this help"
-    echo ""
-    echo -e "${BOLD}Available profiles:${NC}"
-    for p in $AVAILABLE; do echo "  $p"; done
+cycle_profile() {
+    local current p first="" next="" found=0
+    current=$(get_current)
+    for p in $AVAILABLE; do
+        [ -z "$first" ] && first=$p
+        if [ "$found" = 1 ]; then next=$p; break; fi
+        [ "$p" = "$current" ] && found=1
+    done
+    set_profile "${next:-$first}"
 }
 
-show_status() {
-    local CURRENT DEFAULT
-    CURRENT=$(cat "$PROFILE_PATH")
-    DEFAULT=$(get_default)
-    echo -e "Current profile: ${GREEN}${BOLD}${CURRENT}${NC}"
-    echo -e "Default profile: ${CYAN}${DEFAULT}${NC}"
+set_default() {
+    require_valid "$1"
+    mkdir -p "$(dirname "$CONFIG_FILE")"
+    echo "default=$1" > "$CONFIG_FILE"
+    echo "Default profile set to: ${CYAN}${BOLD}$1${NC}"
+    echo "Applied at next login, or run 'predator-mode' to apply it now."
 }
 
 show_list() {
-    local CURRENT DEFAULT
-    CURRENT=$(cat "$PROFILE_PATH")
-    DEFAULT=$(get_default)
-    echo -e "${BOLD}Available profiles:${NC}"
+    local current default p
+    current=$(get_current)
+    default=$(get_default)
     for p in $AVAILABLE; do
-        if [ "$p" = "$CURRENT" ] && [ "$p" = "$DEFAULT" ]; then
-            echo -e "${GREEN}  ▶ $p${NC} ${YELLOW}[active · default]${NC}"
-        elif [ "$p" = "$CURRENT" ]; then
-            echo -e "${GREEN}  ▶ $p [active]${NC}"
-        elif [ "$p" = "$DEFAULT" ]; then
-            echo -e "    $p ${YELLOW}[default]${NC}"
+        if [ "$p" = "$current" ] && [ "$p" = "$default" ]; then
+            echo "${GREEN}  ▶ $p${NC} ${YELLOW}[active · default]${NC}"
+        elif [ "$p" = "$current" ]; then
+            echo "${GREEN}  ▶ $p${NC} ${YELLOW}[active]${NC}"
+        elif [ "$p" = "$default" ]; then
+            echo "    $p ${YELLOW}[default]${NC}"
         else
             echo "    $p"
         fi
     done
 }
 
-cycle_profile() {
-    local CURRENT PROFILES COUNT NEXT
-    CURRENT=$(cat "$PROFILE_PATH")
-    PROFILES=($AVAILABLE)
-    COUNT=${#PROFILES[@]}
-    NEXT=""
+# ── Login service ─────────────────────────────────────────────────────────────
 
-    for i in "${!PROFILES[@]}"; do
-        if [ "${PROFILES[$i]}" = "$CURRENT" ]; then
-            NEXT="${PROFILES[$(( (i + 1) % COUNT ))]}"
-            break
-        fi
-    done
-
-    [ -z "$NEXT" ] && NEXT="${PROFILES[0]}"
-    set_profile "$NEXT"
+service_state() {
+    local s
+    s=$(systemctl --user is-enabled "$SERVICE" 2>/dev/null)
+    echo "${s:-not installed}"
 }
 
-set_default() {
-    local PROFILE="$1"
-    if ! echo "$AVAILABLE" | grep -qw "$PROFILE"; then
-        echo -e "${RED}Error:${NC} '$PROFILE' is not a valid profile."
-        echo -e "Run ${CYAN}predator-mode -l${NC} to see available profiles."
-        exit 1
-    fi
-    mkdir -p "$CONFIG_DIR"
-    echo "default=${PROFILE}" > "$CONFIG_FILE"
-    echo -e "Default profile set to: ${CYAN}${BOLD}${PROFILE}${NC}"
-    echo -e "Takes effect on next login (or run ${CYAN}predator-mode${NC} to apply now)."
+show_status() {
+    echo "Current profile: ${GREEN}${BOLD}$(get_current)${NC}"
+    echo "Default profile: ${CYAN}$(get_default)${NC}"
+    echo "Login service:   $(service_state)"
 }
-
-set_profile() {
-    local PROFILE="$1"
-    if ! echo "$AVAILABLE" | grep -qw "$PROFILE"; then
-        echo -e "${RED}Error:${NC} '$PROFILE' is not a valid profile."
-        echo -e "Run ${CYAN}predator-mode -l${NC} to see available profiles."
-        exit 1
-    fi
-    if echo "$PROFILE" | sudo tee "$PROFILE_PATH" > /dev/null; then
-        echo -e "Profile set to: ${GREEN}${BOLD}${PROFILE}${NC}"
-        notify "$PROFILE"
-    else
-        echo -e "${RED}Error:${NC} Failed to set profile. Check your sudoers rule."
-        exit 1
-    fi
-}
-
-# ── Service commands ──────────────────────────────────────────────────────────
 
 service_enable() {
-    systemctl --user enable --now predator-profile.service \
-        && echo -e "  ${GREEN}✔${NC} Service enabled and started" \
-        || echo -e "  ${RED}✘${NC} Failed to enable service"
+    if systemctl --user enable --now "$SERVICE"; then
+        echo "Login service enabled."
+    else
+        err "could not enable $SERVICE. Is it installed? Re-run the installer."
+        exit 1
+    fi
 }
 
 service_disable() {
-    systemctl --user disable --now predator-profile.service \
-        && echo -e "  ${GREEN}✔${NC} Service disabled and stopped" \
-        || echo -e "  ${RED}✘${NC} Failed to disable service"
-}
-
-service_status() {
-    systemctl --user status predator-profile.service --no-pager -l
-}
-
-# ── Self-update ───────────────────────────────────────────────────────────────
-
-self_update() {
-    echo -e "Fetching latest version from GitHub..."
-
-    local TMP
-    TMP=$(mktemp)
-
-    if ! curl -fsSL "${REPO_RAW}/predator-mode" -o "$TMP"; then
-        rm -f "$TMP"
-        echo -e "${RED}Error:${NC} Download failed. Check your internet connection."
+    if systemctl --user disable --now "$SERVICE"; then
+        echo "Login service disabled."
+    else
+        err "could not disable $SERVICE."
         exit 1
     fi
+}
 
-    if ! head -1 "$TMP" | grep -q "#!/bin/bash"; then
-        rm -f "$TMP"
-        echo -e "${RED}Error:${NC} Downloaded file doesn't look valid. Aborting."
-        exit 1
-    fi
+# ── Help ──────────────────────────────────────────────────────────────────────
 
-    cp "$SCRIPT_PATH" "${SCRIPT_PATH}.bak"
-    chmod +x "$TMP"
-    mv "$TMP" "$SCRIPT_PATH"
+show_help() {
+    cat <<EOF
+${BOLD}predator-mode${NC} $VERSION — Acer Predator platform profile switcher
 
-    echo -e "  ${GREEN}✔${NC} Updated: ${SCRIPT_PATH}"
-    echo -e "  ${CYAN}ℹ${NC}  Previous version backed up to: ${SCRIPT_PATH}.bak"
+${BOLD}Usage:${NC}
+  predator-mode [profile]      Set a profile (no argument: apply the default)
+  predator-mode -c             Cycle to the next profile
+  predator-mode -l             List profiles (active and default marked)
+  predator-mode -s             Show current profile, default and login service
+  predator-mode -d [profile]   Set the default profile, or show it
+  predator-mode --enable       Enable the login service (applies the default at login)
+  predator-mode --disable      Disable the login service
+  predator-mode -v             Show version
+  predator-mode -h             Show this help
+
+${BOLD}Profiles:${NC} ${AVAILABLE:-unavailable on this machine}
+
+Install, update and uninstall: install-predator-mode.sh
+EOF
 }
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
-case "${1}" in
-    -h|--help)     show_help ;;
-    -s|--status)   show_status ;;
-    -l|--list)     show_list ;;
-    -c|--cycle)    cycle_profile ;;
-    -d|--default)
-        if [ -z "$2" ]; then
-            echo -e "Current default: ${CYAN}$(get_default)${NC}"
-        else
-            set_default "$2"
-        fi
-        ;;
-    --enable)      service_enable ;;
-    --disable)     service_disable ;;
-    --service)     service_status ;;
-    --update)      self_update ;;
-    "")            set_profile "$(get_default)" ;;
-    -*)
-        echo -e "${RED}Error:${NC} Unknown flag: ${1}"
-        echo -e "Run ${CYAN}predator-mode -h${NC} for usage."
-        exit 1
-        ;;
-    *)             set_profile "$1" ;;
+need_interface() {
+    [ -f "$PROFILE_PATH" ] && return 0
+    err "$PROFILE_PATH not found. This kernel does not expose ACPI platform profiles."
+    exit 1
+}
+
+case "${1:-}" in
+    -h|--help)    show_help ;;
+    -v|--version) echo "predator-mode $VERSION" ;;
+    --enable)     service_enable ;;
+    --disable)    service_disable ;;
+    -s|--status)  need_interface; show_status ;;
+    -l|--list)    need_interface; show_list ;;
+    -c|--cycle)   need_interface; cycle_profile ;;
+    -d|--default) need_interface
+                  if [ -z "${2:-}" ]; then get_default; else set_default "$2"; fi ;;
+    "")           need_interface; set_profile "$(get_default)" ;;
+    -*)           err "unknown option: $1"; echo "Try: predator-mode -h" >&2; exit 2 ;;
+    *)            need_interface; set_profile "$1" ;;
 esac
