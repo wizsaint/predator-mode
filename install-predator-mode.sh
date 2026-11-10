@@ -1,289 +1,394 @@
 #!/bin/bash
-# =============================================================================
-# install-predator-mode.sh
-# Installer for predator-mode — Acer Predator Helios Neo 16 power profile manager
-# Supports Fedora (KDE) and CachyOS / any Arch-based distro
-# =============================================================================
+# install-predator-mode.sh — install, update or remove predator-mode
+# https://github.com/wizsaint/predator-mode
+#
+#   bash install-predator-mode.sh              install, or update an existing install
+#   bash install-predator-mode.sh --uninstall  remove everything
+#
+# Safe to re-run. Each component (script, sudoers rule, login service) is compared
+# with what is installed and only touched if it differs, so re-running the
+# installer *is* the update. Settings and the login-service on/off choice are kept.
 
-VERSION="1.2.0"
+set -eu
+
 REPO_RAW="https://raw.githubusercontent.com/wizsaint/predator-mode/main"
 
-set -e
-
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-CYAN='\033[0;36m'
-BOLD='\033[1m'
-NC='\033[0m'
-
-SCRIPT_NAME="predator-mode"
-INSTALL_DIR="${HOME}/.local/bin"
-SCRIPT_PATH="${INSTALL_DIR}/${SCRIPT_NAME}"
+BIN_NAME="predator-mode"
+BIN_DIR="$HOME/.local/bin"
+BIN_PATH="$BIN_DIR/$BIN_NAME"
+UNIT_NAME="predator-profile.service"
+UNIT_DIR="$HOME/.config/systemd/user"
+UNIT_PATH="$UNIT_DIR/$UNIT_NAME"
+CONFIG_DIR="$HOME/.config/predator-mode"
 SUDOERS_FILE="/etc/sudoers.d/platform_profile"
-SERVICE_DIR="${HOME}/.config/systemd/user"
-SERVICE_FILE="${SERVICE_DIR}/predator-profile.service"
-CONFIG_DIR="${HOME}/.config/predator-mode"
 PROFILE_PATH="/sys/firmware/acpi/platform_profile"
-PROFILE_CHOICES="${PROFILE_PATH}_choices"
 
-STEPS_TOTAL=5
+USER_NAME=$(id -un)
+WORK=""
+CHANGED=""
 STEP=0
+STEPS=4
+
+# ── Output ────────────────────────────────────────────────────────────────────
+
+BOLD='' DIM='' GREEN='' YELLOW='' CYAN='' RED='' NC=''
+if [ -z "${NO_COLOR:-}" ] && [ -t 1 ]; then
+    BOLD=$'\033[1m' DIM=$'\033[2m' GREEN=$'\033[32m' YELLOW=$'\033[33m'
+    CYAN=$'\033[36m' RED=$'\033[31m' NC=$'\033[0m'
+fi
+
+step() { STEP=$((STEP + 1)); printf '\n%s[%d/%d] %s%s\n' "$BOLD$CYAN" "$STEP" "$STEPS" "$1" "$NC"; }
+ok()   { printf '  %s✔%s %s\n' "$GREEN" "$NC" "$*"; }
+act()  { printf '  %s→%s %s\n' "$CYAN" "$NC" "$*"; }
+note() { printf '  %s•%s %s\n' "$DIM" "$NC" "$*"; }
+warn() { printf '  %s⚠%s %s\n' "$YELLOW" "$NC" "$*"; }
+fail() { printf '\n%s✘ Error:%s %s\n' "$RED" "$NC" "$*" >&2; exit 1; }
+
+usage() {
+    cat <<EOF
+Usage: bash install-predator-mode.sh [--uninstall]
+
+  (no option)   Install predator-mode, or update an existing installation.
+                Safe to re-run: only components that differ are changed.
+  --uninstall   Remove predator-mode, its sudoers rule and its login service.
+  -h, --help    Show this help.
+EOF
+}
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-print_header() {
-    echo ""
-    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${BOLD}  predator-mode installer ${CYAN}v${VERSION}${NC}"
-    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo ""
-}
+have() { command -v "$1" >/dev/null 2>&1; }
 
-step() {
-    STEP=$((STEP + 1))
-    echo -e "\n${CYAN}${BOLD}[${STEP}/${STEPS_TOTAL}] $1${NC}"
-}
+# run_as 1 CMD… runs through sudo, run_as 0 CMD… runs as the current user
+run_as() { local priv=$1; shift; if [ "$priv" = 1 ]; then sudo "$@"; else "$@"; fi; }
 
-ok()   { echo -e "  ${GREEN}✔${NC} $1"; }
-warn() { echo -e "  ${YELLOW}⚠${NC}  $1"; }
-fail() { echo -e "\n${RED}${BOLD}✘ Error:${NC} $1"; exit 1; }
-
-backup_if_exists() {
-    local FILE="$1"
-    if [ -f "$FILE" ]; then
-        local BACKUP="${FILE}.bak.$(date +%Y%m%d%H%M%S)"
-        cp "$FILE" "$BACKUP"
-        warn "Existing file backed up to: $BACKUP"
+refuse_root() {
+    if [ "$(id -u)" -eq 0 ]; then
+        fail "don't run this as root or with sudo. It sets up files in your home directory and calls sudo itself where needed."
     fi
 }
 
-detect_shell() {
-    basename "$(getent passwd "$USER" | cut -d: -f7)"
+read_version() { grep -m1 '^VERSION=' "$1" 2>/dev/null | cut -d'"' -f2 || true; }
+
+verb() { if [ "$1" = missing ]; then echo installed; else echo updated; fi; }
+
+on_path() {
+    case ":$PATH:" in *":$BIN_DIR:"*) return 0 ;; esac
+    # The installer runs under bash; the login shell may know better (e.g. fish_add_path)
+    local sh=${SHELL:-}
+    [ -x "$sh" ] || return 1
+    timeout 5 "$sh" -lc "command -v $BIN_NAME" >/dev/null 2>&1
 }
 
-# ── Step 1 — Compatibility check ──────────────────────────────────────────────
-
-check_compatibility() {
-    step "Checking system compatibility"
-
-    if [ ! -f "$PROFILE_PATH" ]; then
-        fail "ACPI platform_profile interface not found.\n  This script requires kernel support for platform profiles."
-    fi
-    ok "ACPI platform_profile interface found"
-
-    local AVAILABLE
-    AVAILABLE=$(cat "$PROFILE_CHOICES" 2>/dev/null)
-    if [ -z "$AVAILABLE" ]; then
-        fail "Could not read platform_profile_choices."
-    fi
-    ok "Available profiles: ${AVAILABLE}"
-
-    if ! echo "$AVAILABLE" | grep -qw "balanced-performance"; then
-        warn "'balanced-performance' not in profile list — default will fall back to 'balanced'"
-    fi
-
-    if ! sudo -v 2>/dev/null; then
-        fail "sudo access required to install sudoers rule."
-    fi
-    ok "sudo access confirmed"
-
-    if [ -f /etc/os-release ]; then
-        . /etc/os-release
-        ok "Detected OS: ${PRETTY_NAME}"
-    fi
-
-    if ! command -v curl &>/dev/null; then
-        fail "curl is required but not installed. Install it and re-run."
-    fi
-    ok "curl found"
+build_sudoers() {
+    cat <<EOF
+# Managed by install-predator-mode.sh: lets $USER_NAME switch the platform profile without a password
+$USER_NAME ALL=(root) NOPASSWD: /usr/bin/tee $PROFILE_PATH
+EOF
 }
 
-# ── Step 2 — Download and install the predator-mode script ───────────────────
-
-install_script() {
-    step "Downloading predator-mode script from GitHub"
-
-    mkdir -p "$INSTALL_DIR"
-    backup_if_exists "$SCRIPT_PATH"
-
-    local DOWNLOAD_URL="${REPO_RAW}/predator-mode"
-    if ! curl -fsSL "$DOWNLOAD_URL" -o "$SCRIPT_PATH"; then
-        fail "Failed to download predator-mode from:\n  ${DOWNLOAD_URL}\n  Check your internet connection."
-    fi
-
-    chmod +x "$SCRIPT_PATH"
-    ok "Script downloaded and installed: ${SCRIPT_PATH}"
-
-    local SHELL_NAME
-    SHELL_NAME=$(detect_shell)
-
-    if ! echo "$PATH" | grep -q "${HOME}/.local/bin"; then
-        warn "~/.local/bin is not in your PATH."
-        case "$SHELL_NAME" in
-            fish) warn "Run: fish_add_path ~/.local/bin" ;;
-            zsh)  warn "Add to ~/.zshrc:  export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
-            *)    warn "Add to ~/.bashrc: export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
-        esac
-    else
-        ok "~/.local/bin is in PATH"
-    fi
-}
-
-# ── Step 3 — Install sudoers rule ─────────────────────────────────────────────
-
-install_sudoers() {
-    step "Installing sudoers rule"
-
-    local SUDOERS_LINE="${USER} ALL=(ALL) NOPASSWD: /usr/bin/tee /sys/firmware/acpi/platform_profile"
-    local TMPFILE
-    TMPFILE=$(mktemp)
-
-    echo "$SUDOERS_LINE" > "$TMPFILE"
-
-    if ! sudo visudo -c -f "$TMPFILE" > /dev/null 2>&1; then
-        rm -f "$TMPFILE"
-        fail "Sudoers syntax validation failed. Please report this."
-    fi
-
-    sudo cp "$TMPFILE" "$SUDOERS_FILE"
-    sudo chmod 0440 "$SUDOERS_FILE"
-    rm -f "$TMPFILE"
-
-    ok "Sudoers rule installed: ${SUDOERS_FILE}"
-    ok "Rule: ${SUDOERS_LINE}"
-}
-
-# ── Step 4 — Install systemd user service ────────────────────────────────────
-
-install_service() {
-    step "Installing systemd user service"
-
-    mkdir -p "$SERVICE_DIR"
-    backup_if_exists "$SERVICE_FILE"
-
-    cat > "$SERVICE_FILE" << EOF
+build_unit() {
+    cat <<'EOF'
+# Managed by install-predator-mode.sh
 [Unit]
-Description=Set Predator power profile after login
+Description=Apply the default Predator power profile after login
 After=graphical-session.target
 
 [Service]
 Type=oneshot
 ExecStartPre=/bin/sleep 2
-ExecStart=${SCRIPT_PATH}
+ExecStart=%h/.local/bin/predator-mode
 RemainAfterExit=yes
 
 [Install]
 WantedBy=graphical-session.target
 EOF
-
-    ok "Service file installed: ${SERVICE_FILE}"
 }
 
-# ── Step 5 — Enable and start the service ────────────────────────────────────
-
-activate_service() {
-    step "Enabling systemd user service"
-
-    systemctl --user daemon-reload
-    systemctl --user disable predator-profile.service > /dev/null 2>&1 || true
-    systemctl --user enable predator-profile.service
-    systemctl --user restart predator-profile.service
-
-    ok "Service enabled and started"
-
-    # Wait for service ExecStartPre (2s) + execution to complete
-    sleep 3
-    local CURRENT
-    CURRENT=$(cat "$PROFILE_PATH" 2>/dev/null)
-    ok "Current profile: ${CURRENT}"
+# same_file NEW EXISTING USE_SUDO — true if EXISTING has exactly NEW's content
+same_file() {
+    if [ "$3" = 1 ]; then
+        sudo cat "$2" 2>/dev/null | cmp -s - "$1"
+    else
+        cmp -s "$1" "$2"
+    fi
 }
 
-# ── Summary ───────────────────────────────────────────────────────────────────
+# place SRC DEST MODE USE_SUDO BACKUP
+# Installs SRC at DEST atomically (copy next to it, then rename). With BACKUP=1 an
+# existing DEST is first copied to DEST.bak (a single backup, overwritten each time).
+place() {
+    local src=$1 dest=$2 mode=$3 priv=$4 backup=$5 owner=""
+    if [ "$priv" = 1 ]; then owner="-o root -g root"; fi
+    if [ "$backup" = 1 ] && [ -e "$dest" ]; then
+        act "cp -p $dest $dest.bak"
+        run_as "$priv" cp -p "$dest" "$dest.bak"
+    fi
+    act "install -m $mode ${owner:+$owner }$dest"
+    # shellcheck disable=SC2086  # $owner is meant to split into separate arguments
+    run_as "$priv" install -m "$mode" $owner "$src" "$dest.new"
+    run_as "$priv" mv -f "$dest.new" "$dest"
+}
 
-print_summary() {
-    echo ""
-    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${GREEN}${BOLD}  Installation complete!${NC}"
-    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo ""
-    echo -e "${BOLD}Quick reference:${NC}"
-    echo "  predator-mode              Apply default profile"
-    echo "  predator-mode quiet        Switch to quiet"
-    echo "  predator-mode performance  Switch to turbo"
-    echo "  predator-mode -c           Cycle to next profile"
-    echo "  predator-mode -l           List all profiles"
-    echo "  predator-mode -s           Show current + default"
-    echo "  predator-mode -d [profile] Set a new default"
-    echo "  predator-mode --enable     Enable login service"
-    echo "  predator-mode --disable    Disable login service"
-    echo "  predator-mode --service    Show service status"
-    echo "  predator-mode --update     Update to latest version"
-    echo "  predator-mode -h           Help"
-    echo ""
-    echo -e "${BOLD}Service status:${NC}"
-    systemctl --user status predator-profile.service --no-pager -l \
-        | grep -E "Active|Main PID|predator" | sed 's/^/  /'
-    echo ""
+# ── 1. Pre-flight ─────────────────────────────────────────────────────────────
+
+preflight() {
+    step "Pre-flight checks"
+    refuse_root
+    ok "running as '$USER_NAME' (home: $HOME)"
+
+    if [ ! -r "$PROFILE_PATH" ]; then
+        fail "$PROFILE_PATH not found. This kernel does not expose ACPI platform profiles (needs Linux 5.12+ and a supported laptop)."
+    fi
+    ok "kernel exposes $PROFILE_PATH"
+
+    local choices
+    choices=$(cat "${PROFILE_PATH}_choices" 2>/dev/null || true)
+    [ -n "$choices" ] || fail "could not read ${PROFILE_PATH}_choices"
+    ok "available profiles: $choices"
+    case " $choices " in
+        *" balanced-performance "*) ;;
+        *) warn "'balanced-performance' is not offered here; the default will fall back to 'balanced'" ;;
+    esac
+
+    have systemctl || fail "systemd is required (systemctl not found)"
+    systemctl --user show-environment >/dev/null 2>&1 \
+        || fail "no systemd user session. Run this from a normal desktop login, not from su or a bare TTY."
+    ok "systemd user session available"
+
+    have sudo || fail "sudo is required (it is used to install the sudoers rule)"
+    [ -x /usr/bin/tee ] || fail "/usr/bin/tee not found (the sudoers rule is tied to that path)"
+    note "sudo is needed once, to install and check $SUDOERS_FILE"
+    sudo -v || fail "sudo authentication failed"
+    ok "sudo access confirmed"
+}
+
+# ── 2. Get the script ─────────────────────────────────────────────────────────
+
+fetch_source() {
+    step "Getting predator-mode"
+    local self="${BASH_SOURCE[0]:-}" here=""
+    if [ -f "$self" ]; then here=$(cd "$(dirname "$self")" && pwd); fi
+
+    if [ -n "$here" ] && [ -d "$here/.git" ] && [ -f "$here/$BIN_NAME" ]; then
+        cp "$here/$BIN_NAME" "$WORK/$BIN_NAME"
+        ok "using the copy in this git checkout: $here/$BIN_NAME"
+    else
+        have curl || fail "curl is required to download predator-mode"
+        act "curl -fsSL $REPO_RAW/$BIN_NAME"
+        curl -fsSL "$REPO_RAW/$BIN_NAME" -o "$WORK/$BIN_NAME" \
+            || fail "download failed. Check your internet connection."
+        ok "downloaded $(wc -c < "$WORK/$BIN_NAME") bytes"
+    fi
+
+    head -n1 "$WORK/$BIN_NAME" | grep -q '^#!/bin/bash' \
+        || fail "the downloaded file is not a bash script (wrong URL, or an error page?)"
+    bash -n "$WORK/$BIN_NAME" || fail "the downloaded script has a syntax error; not installing it"
+    NEW_VERSION=$(read_version "$WORK/$BIN_NAME")
+    [ -n "$NEW_VERSION" ] || fail "could not read VERSION from the downloaded script"
+    ok "valid script, version $NEW_VERSION"
+}
+
+# ── 3. Inspect ────────────────────────────────────────────────────────────────
+
+inspect() {
+    step "Inspecting current installation"
+
+    local old_version old_label
+
+    # Script
+    if [ -e "$BIN_PATH" ]; then
+        old_version=$(read_version "$BIN_PATH")
+        old_label=${old_version:+v$old_version}
+        old_label=${old_label:-an older version}
+        if cmp -s "$WORK/$BIN_NAME" "$BIN_PATH"; then
+            BIN_STATE=current
+            note "script    $BIN_PATH: v$NEW_VERSION, up to date"
+        else
+            BIN_STATE=outdated
+            if [ "$old_version" = "$NEW_VERSION" ]; then
+                note "script    $BIN_PATH: v$NEW_VERSION but the content differs (local edits?), will be replaced"
+            else
+                note "script    $BIN_PATH: $old_label installed, will update to v$NEW_VERSION"
+            fi
+        fi
+    else
+        BIN_STATE=missing
+        note "script    not installed, will install v$NEW_VERSION to $BIN_PATH"
+    fi
+
+    # Sudoers rule
+    build_sudoers > "$WORK/sudoers"
+    if sudo test -e "$SUDOERS_FILE"; then
+        if same_file "$WORK/sudoers" "$SUDOERS_FILE" 1; then
+            SUDO_STATE=current
+            note "sudoers   $SUDOERS_FILE: up to date"
+        else
+            SUDO_STATE=outdated
+            note "sudoers   $SUDOERS_FILE: differs from the expected rule, will be rewritten"
+        fi
+    else
+        SUDO_STATE=missing
+        note "sudoers   not installed, will create $SUDOERS_FILE"
+    fi
+
+    # Login service
+    build_unit > "$WORK/unit"
+    ENABLED_STATE=$(systemctl --user is-enabled "$UNIT_NAME" 2>/dev/null || true)
+    if [ -e "$UNIT_PATH" ]; then
+        if same_file "$WORK/unit" "$UNIT_PATH" 0; then
+            UNIT_STATE=current
+            note "service   $UNIT_PATH: up to date (${ENABLED_STATE:-not enabled})"
+        else
+            UNIT_STATE=outdated
+            note "service   $UNIT_PATH: differs from the expected unit, will be rewritten (${ENABLED_STATE:-not enabled})"
+        fi
+    else
+        UNIT_STATE=missing
+        note "service   not installed, will create $UNIT_PATH"
+    fi
+}
+
+# ── 4. Apply ──────────────────────────────────────────────────────────────────
+
+apply() {
+    step "Applying changes"
+
+    # Script
+    if [ "$BIN_STATE" = current ]; then
+        ok "script already up to date"
+    else
+        mkdir -p "$BIN_DIR"
+        place "$WORK/$BIN_NAME" "$BIN_PATH" 0755 0 1
+        ok "script $(verb "$BIN_STATE") (v$NEW_VERSION)"
+        CHANGED="$CHANGED script"
+    fi
+
+    # Sudoers rule: always syntax-checked before it goes live
+    if [ "$SUDO_STATE" = current ]; then
+        ok "sudoers rule already up to date"
+    else
+        act "visudo -c -f (syntax check before installing)"
+        sudo visudo -c -f "$WORK/sudoers" >/dev/null 2>&1 \
+            || fail "the generated sudoers rule failed validation; nothing was installed. Please report this."
+        place "$WORK/sudoers" "$SUDOERS_FILE" 0440 1 0
+        ok "sudoers rule $(verb "$SUDO_STATE")"
+        CHANGED="$CHANGED sudoers"
+    fi
+
+    # Login service
+    if [ "$UNIT_STATE" = current ]; then
+        ok "login service already up to date"
+    else
+        mkdir -p "$UNIT_DIR"
+        place "$WORK/unit" "$UNIT_PATH" 0644 0 1
+        act "systemctl --user daemon-reload"
+        systemctl --user daemon-reload
+        ok "login service $(verb "$UNIT_STATE")"
+        CHANGED="$CHANGED service"
+    fi
+
+    # Enablement: switch on for a fresh install; otherwise respect the user's choice
+    if [ "$UNIT_STATE" = missing ]; then
+        act "systemctl --user enable --now $UNIT_NAME   (applies your default profile now, takes ~2s)"
+        systemctl --user enable --now "$UNIT_NAME"
+        ok "login service enabled and started"
+    elif [ "$ENABLED_STATE" = enabled ]; then
+        ok "login service already enabled"
+    else
+        note "login service is '${ENABLED_STATE:-not enabled}'; left as it is (turn it on with: predator-mode --enable)"
+    fi
+}
+
+summary() {
+    printf '\n%s━━ Done ━━%s\n' "$BOLD" "$NC"
+    if [ -z "$CHANGED" ]; then
+        ok "already up to date, nothing was changed"
+    else
+        ok "changed:$CHANGED"
+    fi
+    if [ "$BIN_STATE" != current ] && [ "$UNIT_STATE" != missing ]; then
+        note "your current power profile was not touched"
+    fi
+
+    printf '\n%sStatus%s\n' "$BOLD" "$NC"
+    "$BIN_PATH" --version | sed 's/^/  /' || true
+    "$BIN_PATH" -s | sed 's/^/  /' || true
+
+    if ! on_path; then
+        printf '\n'
+        warn "$BIN_DIR is not on your PATH, so '$BIN_NAME' won't be found by name yet:"
+        case "$(basename "${SHELL:-bash}")" in
+            fish) warn "run:  fish_add_path ~/.local/bin" ;;
+            zsh)  warn "add to ~/.zshrc:   export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
+            *)    warn "add to ~/.bashrc:  export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
+        esac
+    fi
+    printf '\nRun %s%s -h%s for usage.\n' "$BOLD" "$BIN_NAME" "$NC"
+}
+
+do_install() {
+    WORK=$(mktemp -d)
+    trap 'rm -rf "$WORK"' EXIT
+    printf '%s━━ predator-mode installer ━━%s\n' "$BOLD" "$NC"
+    preflight
+    fetch_source
+    inspect
+    apply
+    summary
 }
 
 # ── Uninstall ─────────────────────────────────────────────────────────────────
 
-uninstall() {
-    echo -e "\n${YELLOW}${BOLD}Uninstalling predator-mode...${NC}\n"
+remove() { # remove PATH USE_SUDO
+    if run_as "$2" test -e "$1"; then
+        run_as "$2" rm -f "$1"
+        ok "removed $1"
+    else
+        note "not found: $1"
+    fi
+}
 
-    systemctl --user disable --now predator-profile.service 2>/dev/null \
-        && ok "Service disabled" || warn "Service was not active"
+do_uninstall() {
+    printf '%s━━ predator-mode uninstaller ━━%s\n\n' "$BOLD" "$NC"
+    refuse_root
+    have sudo || fail "sudo is required to remove $SUDOERS_FILE"
+    sudo -v || fail "sudo authentication failed"
 
-    rm -f "$SERVICE_FILE"      && ok "Removed: ${SERVICE_FILE}"   || warn "Not found: ${SERVICE_FILE}"
-    rm -f "$SCRIPT_PATH"       && ok "Removed: ${SCRIPT_PATH}"    || warn "Not found: ${SCRIPT_PATH}"
-    sudo rm -f "$SUDOERS_FILE" && ok "Removed: ${SUDOERS_FILE}"   || warn "Not found: ${SUDOERS_FILE}"
-
-    systemctl --user daemon-reload
+    if systemctl --user disable --now "$UNIT_NAME" >/dev/null 2>&1; then
+        ok "login service disabled and stopped"
+    else
+        note "login service was not enabled"
+    fi
+    remove "$UNIT_PATH" 0
+    remove "$UNIT_PATH.bak" 0
+    systemctl --user daemon-reload || true
+    remove "$BIN_PATH" 0
+    remove "$BIN_PATH.bak" 0
+    remove "$SUDOERS_FILE" 1
 
     if [ -d "$CONFIG_DIR" ]; then
-        echo ""
-        read -rp "  Remove config directory ($CONFIG_DIR)? [y/N] " REPLY
-        if [[ "$REPLY" =~ ^[Yy]$ ]]; then
-            rm -rf "$CONFIG_DIR" && ok "Removed: ${CONFIG_DIR}"
+        local reply=""
+        if [ -t 0 ]; then
+            read -rp "  Also delete your saved settings in $CONFIG_DIR? [y/N] " reply || true
+        fi
+        if [[ "$reply" =~ ^[Yy]$ ]]; then
+            rm -rf "$CONFIG_DIR"
+            ok "removed $CONFIG_DIR"
         else
-            ok "Config directory kept at: ${CONFIG_DIR}"
+            note "kept $CONFIG_DIR"
         fi
     fi
 
-    echo -e "\n${GREEN}Done.${NC}\n"
-    exit 0
+    printf '\n'
+    ok "done. Your current power profile was not changed."
 }
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
-case "${1}" in
-    --uninstall|-u)
-        uninstall
-        ;;
-    --help|-h)
-        echo "predator-mode installer v${VERSION}"
-        echo ""
-        echo "Usage: $0 [option]"
-        echo "  (no args)     Run the installer"
-        echo "  --uninstall   Remove everything"
-        echo "  --version     Print version"
-        exit 0
-        ;;
-    --version|-v)
-        echo "predator-mode installer v${VERSION}"
-        exit 0
-        ;;
-    "")
-        print_header
-        check_compatibility
-        install_script
-        install_sudoers
-        install_service
-        activate_service
-        print_summary
-        ;;
-    *)
-        fail "Unknown option: $1. Use --help for usage."
-        ;;
+case "${1:-}" in
+    "")              do_install ;;
+    --uninstall|-u)  do_uninstall ;;
+    -h|--help)       usage ;;
+    *)               usage >&2; exit 2 ;;
 esac
