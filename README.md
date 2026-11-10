@@ -1,6 +1,6 @@
 # predator-mode
 
-Switch between all five ACPI power profiles on the **Acer Predator Helios Neo 16** from Linux, and have your preferred one applied automatically at login.
+Switch between all five ACPI power profiles on the **Acer Predator Helios Neo 16** from Linux, and optionally have your preferred one applied automatically at login.
 
 ## Why
 
@@ -25,9 +25,9 @@ The same two commands install, update and repair. The installer compares each co
 |---|---|---|
 | Script | `~/.local/bin/predator-mode` | Installs it, or replaces it if the content changed (old copy kept as `.bak`) |
 | Sudoers rule | `/etc/sudoers.d/platform_profile` | Creates or repairs it, syntax-checked before it goes live |
-| Login service | `~/.config/systemd/user/predator-profile.service` | Creates or repairs it, then enables it on a fresh install |
+| Login service | `~/.config/systemd/user/predator-profile.service` | Installs or repairs it. Off by default: turn it on with `predator-mode --enable` |
 
-It explains what it finds and what it's doing at every step, and it never resets your current profile, your saved default, or a login service you turned off.
+It explains what it finds and what it's doing at every step, and it never changes your current profile, your saved default, or whether the login service is on.
 
 To remove everything: `bash install-predator-mode.sh --uninstall`
 
@@ -43,7 +43,7 @@ predator-mode -l               # list profiles (active and default marked)
 predator-mode -s               # current profile, default, login service state
 predator-mode -d quiet         # save a new default (applied at next login)
 predator-mode -d               # show the saved default
-predator-mode --enable         # enable the login service
+predator-mode --enable         # apply your default at every login (opt-in)
 predator-mode --disable        # disable it
 predator-mode -v               # version
 ```
@@ -56,7 +56,7 @@ predator-mode -v               # version
 | `balanced-performance` | Power unlocked, moderate fan curve |
 | `performance` | Turbo, fans fully uncapped |
 
-**Keyboard shortcut:** bind `~/.local/bin/predator-mode -c` in System Settings → Shortcuts → Custom Shortcuts. With `libnotify` installed (`notify-send`), each switch shows a notification.
+**Keyboard shortcut:** bind `~/.local/bin/predator-mode -c` in System Settings → Shortcuts → Custom Shortcuts. With `libnotify` installed (`notify-send`), switching by name or with `-c` shows a notification; applying the default (what the login service does) is silent.
 
 ## Manual install
 
@@ -96,8 +96,9 @@ WantedBy=graphical-session.target
 
 ```bash
 systemctl --user daemon-reload
-systemctl --user enable --now predator-profile.service
 ```
+
+The login service is opt-in: run `predator-mode --enable` if you want your default applied at every login.
 
 To update a manual install, repeat the `curl` line.
 
@@ -112,7 +113,6 @@ The service runs after login rather than at boot because the desktop's power man
 - **`predator-mode: command not found`**: `~/.local/bin` isn't on your PATH. bash/zsh: add `export PATH="$HOME/.local/bin:$PATH"` to `~/.bashrc` / `~/.zshrc`. fish: `fish_add_path ~/.local/bin`.
 - **"could not write to /sys/firmware/acpi/platform_profile"**: the sudoers rule is missing. Re-run the installer.
 - **Profile is `balanced` after login**: check `predator-mode -s`. If the login service shows `disabled` or `not installed`, run `predator-mode --enable` or re-run the installer.
-- **`preset: disabled` in `systemctl --user status` on Fedora**: normal. The installer enables the service explicitly; confirm with `systemctl --user is-enabled predator-profile.service`.
 - **"saved default … is not available"**: your config names a profile this machine doesn't offer. Fix it with `predator-mode -d balanced-performance`.
 
 ## Limitations
